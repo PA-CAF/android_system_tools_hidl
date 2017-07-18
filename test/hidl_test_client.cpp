@@ -1,6 +1,7 @@
 #define LOG_TAG "hidl_test_client"
 
 #include "FooCallback.h"
+#include "hidl_test.h"
 
 #include <android-base/logging.h>
 
@@ -12,22 +13,25 @@
 
 #include <android/hidl/token/1.0/ITokenManager.h>
 
-#include <android/hardware/tests/foo/1.0/IFoo.h>
-#include <android/hardware/tests/foo/1.0/BnHwSimple.h>
-#include <android/hardware/tests/foo/1.0/BsSimple.h>
-#include <android/hardware/tests/foo/1.0/BpHwSimple.h>
+#include <android/hardware/tests/bar/1.0/BpHwBar.h>
+#include <android/hardware/tests/bar/1.0/BnHwBar.h>
 #include <android/hardware/tests/bar/1.0/IBar.h>
 #include <android/hardware/tests/bar/1.0/BpHwBar.h>
 #include <android/hardware/tests/bar/1.0/BnHwBar.h>
 #include <android/hardware/tests/bar/1.0/IComplicated.h>
 #include <android/hardware/tests/bar/1.0/IImportRules.h>
 #include <android/hardware/tests/baz/1.0/IBaz.h>
+#include <android/hardware/tests/foo/1.0/BnHwSimple.h>
+#include <android/hardware/tests/foo/1.0/BpHwSimple.h>
+#include <android/hardware/tests/foo/1.0/BsSimple.h>
+#include <android/hardware/tests/foo/1.0/IFoo.h>
 #include <android/hardware/tests/hash/1.0/IHash.h>
+#include <android/hardware/tests/inheritance/1.0/IChild.h>
 #include <android/hardware/tests/inheritance/1.0/IFetcher.h>
 #include <android/hardware/tests/inheritance/1.0/IGrandparent.h>
 #include <android/hardware/tests/inheritance/1.0/IParent.h>
-#include <android/hardware/tests/inheritance/1.0/IChild.h>
 #include <android/hardware/tests/memory/1.0/IMemoryTest.h>
+#include <android/hardware/tests/multithread/1.0/IMultithread.h>
 #include <android/hardware/tests/pointer/1.0/IGraph.h>
 #include <android/hardware/tests/pointer/1.0/IPointer.h>
 
@@ -42,19 +46,23 @@
 #error "GTest did not detect pthread library."
 #endif
 
-#include <algorithm>
-#include <condition_variable>
 #include <getopt.h>
 #include <inttypes.h>
+#include <algorithm>
+#include <condition_variable>
+#include <fstream>
+#include <future>
 #include <mutex>
 #include <set>
 #include <sstream>
+#include <thread>
 #include <utility>
 #include <vector>
 
 #include <hidl-test/FooHelper.h>
 #include <hidl-test/PointerHelper.h>
 
+#include <hidl/ServiceManagement.h>
 #include <hidl/Status.h>
 #include <hidlmemory/mapping.h>
 
@@ -95,6 +103,7 @@ using ::android::hardware::tests::inheritance::V1_0::IChild;
 using ::android::hardware::tests::pointer::V1_0::IGraph;
 using ::android::hardware::tests::pointer::V1_0::IPointer;
 using ::android::hardware::tests::memory::V1_0::IMemoryTest;
+using ::android::hardware::tests::multithread::V1_0::IMultithread;
 using ::android::hardware::Return;
 using ::android::hardware::Void;
 using ::android::hardware::hidl_array;
@@ -119,6 +128,17 @@ using ::android::DELAY_NS;
 using ::android::TOLERANCE_NS;
 using ::android::ONEWAY_TOLERANCE_NS;
 using std::to_string;
+
+bool isLibraryOpen(const std::string &lib) {
+    std::ifstream ifs("/proc/self/maps");
+    for (std::string line; std::getline(ifs, line);) {
+        if (line.size() >= lib.size() && line.substr(line.size() - lib.size()) == lib) {
+            return true;
+        }
+    }
+
+    return false;
+}
 
 template <typename T>
 static inline ::testing::AssertionResult isOk(const ::android::hardware::Return<T> &ret) {
@@ -354,6 +374,7 @@ public:
     sp<IGraph> graphInterface;
     sp<IPointer> pointerInterface;
     sp<IPointer> validationPointerInterface;
+    sp<IMultithread> multithreadInterface;
     TestMode mode;
     bool enableDelayMeasurementTests;
     HidlEnvironment(TestMode mode, bool enableDelayMeasurementTests) :
@@ -410,6 +431,11 @@ public:
         // use passthrough mode as the validation object.
         validationPointerInterface = IPointer::getService("pointer", true /* getStub */);
         ASSERT_NE(validationPointerInterface, nullptr);
+
+        multithreadInterface =
+            IMultithread::getService("multithread", mode == PASSTHROUGH /* getStub */);
+        ASSERT_NE(multithreadInterface, nullptr);
+        ASSERT_EQ(multithreadInterface->isRemote(), mode == BINDERIZED);
     }
 
     virtual void SetUp() {
@@ -451,6 +477,19 @@ public:
         ALOGI("Test setup complete");
     }
 };
+
+TEST_F(HidlTest, PreloadTest) {
+    // in passthrough mode, this will already be opened
+    if (mode == BINDERIZED) {
+        using android::hardware::preloadPassthroughService;
+
+        static const std::string kLib = "android.hardware.tests.inheritance@1.0-impl.so";
+
+        EXPECT_FALSE(isLibraryOpen(kLib));
+        preloadPassthroughService<IParent>();
+        EXPECT_TRUE(isLibraryOpen(kLib));
+    }
+}
 
 TEST_F(HidlTest, ToStringTest) {
     using namespace android::hardware;
@@ -1250,6 +1289,13 @@ TEST_F(HidlTest, FooNullNativeHandleTest) {
     }));
 }
 
+TEST_F(HidlTest, FooNullSynchronousCallbackTest) {
+    Return<void> ret = foo->echoNullInterface(nullptr, nullptr /* synchronous callback */);
+
+    EXPECT_FAIL(ret);
+    EXPECT_TRUE(ret.description().find("Null synchronous callback passed") != std::string::npos);
+}
+
 TEST_F(HidlTest, FooNullCallbackTest) {
     EXPECT_OK(foo->echoNullInterface(nullptr,
                 [](const auto receivedNull, const auto &intf) {
@@ -1404,14 +1450,14 @@ TEST_F(HidlTest, DeathRecipientTest) {
     }
 
     std::unique_lock<std::mutex> lock(recipient->mutex);
-    recipient->condition.wait_for(lock, std::chrono::milliseconds(1000), [&recipient]() {
+    recipient->condition.wait_for(lock, std::chrono::milliseconds(100), [&recipient]() {
             return recipient->fired;
     });
     EXPECT_TRUE(recipient->fired);
     EXPECT_EQ(recipient->cookie, 0x1481u);
     EXPECT_EQ(recipient->who, dyingBaz);
     std::unique_lock<std::mutex> lock2(recipient2->mutex);
-    recipient2->condition.wait_for(lock2, std::chrono::milliseconds(1000), [&recipient2]() {
+    recipient2->condition.wait_for(lock2, std::chrono::milliseconds(100), [&recipient2]() {
             return recipient2->fired;
     });
     EXPECT_FALSE(recipient2->fired);
@@ -1431,14 +1477,18 @@ TEST_F(HidlTest, BarThisIsNewTest) {
     ALOGI("CLIENT thisIsNew returned.");
 }
 
-static void expectGoodChild(const sp<IChild> &child) {
+static void expectGoodChild(sp<IChild> child) {
+    ASSERT_NE(child.get(), nullptr);
+    child = IChild::castFrom(child);
     ASSERT_NE(child.get(), nullptr);
     EXPECT_OK(child->doGrandparent());
     EXPECT_OK(child->doParent());
     EXPECT_OK(child->doChild());
 }
 
-static void expectGoodParent(const sp<IParent> &parent) {
+static void expectGoodParent(sp<IParent> parent) {
+    ASSERT_NE(parent.get(), nullptr);
+    parent = IParent::castFrom(parent);
     ASSERT_NE(parent.get(), nullptr);
     EXPECT_OK(parent->doGrandparent());
     EXPECT_OK(parent->doParent());
@@ -1446,7 +1496,9 @@ static void expectGoodParent(const sp<IParent> &parent) {
     expectGoodChild(child);
 }
 
-static void expectGoodGrandparent(const sp<IGrandparent> &grandparent) {
+static void expectGoodGrandparent(sp<IGrandparent> grandparent) {
+    ASSERT_NE(grandparent.get(), nullptr);
+    grandparent = IGrandparent::castFrom(grandparent);
     ASSERT_NE(grandparent.get(), nullptr);
     EXPECT_OK(grandparent->doGrandparent());
     sp<IParent> parent = IParent::castFrom(grandparent);
@@ -1454,7 +1506,6 @@ static void expectGoodGrandparent(const sp<IGrandparent> &grandparent) {
 }
 
 TEST_F(HidlTest, FooHaveAnInterfaceTest) {
-
     sp<ISimple> in = new Complicated(42);
     Return<sp<ISimple>> ret = bar->haveAInterface(in);
     EXPECT_OK(ret);
@@ -1583,6 +1634,54 @@ TEST_F(HidlTest, InvalidTransactionTest) {
     EXPECT_EQ(status, ::android::UNKNOWN_TRANSACTION);
     // Try another call, to make sure nothing is messed up
     EXPECT_OK(bar->thisIsNew());
+}
+
+class HidlMultithreadTest : public ::testing::Test {
+   public:
+    sp<IMultithread> multithreadInterface;
+    TestMode mode = TestMode::PASSTHROUGH;
+
+    virtual void SetUp() override {
+        ALOGI("Test setup beginning...");
+        multithreadInterface = gHidlEnvironment->multithreadInterface;
+        mode = gHidlEnvironment->mode;
+        ALOGI("Test setup complete");
+    }
+
+    void test_multithread(int maxThreads, int numThreads) {
+        LOG(INFO) << "CLIENT call setNumThreads("
+                  << maxThreads << ", " << numThreads << ")";
+        EXPECT_OK(multithreadInterface->setNumThreads(maxThreads, numThreads));
+
+        std::vector<std::future<bool>> threads;
+
+        for (int i = 0; i != numThreads; ++i) {
+            LOG(INFO) << "CLIENT call runNewThread";
+            threads.emplace_back(std::async(
+                std::launch::async, [&]() { return (bool)multithreadInterface->runNewThread(); }));
+        }
+
+        bool noTimeout = std::all_of(threads.begin(), threads.end(),
+                                     [](std::future<bool>& thread) { return thread.get(); });
+        EXPECT_EQ(noTimeout, maxThreads >= numThreads || mode == PASSTHROUGH);
+    }
+};
+
+// If it fails first try to increment timeout duration at
+// hardware/interfaces/tests/multithread/1.0/default
+TEST_F(HidlMultithreadTest, MultithreadTest) {
+    // configureRpcThreadpool doesn't stop threads,
+    // so maxThreads should not decrease
+    test_multithread(1, 1);
+    test_multithread(2, 1);
+    test_multithread(2, 2);
+    test_multithread(2, 3);
+    test_multithread(10, 5);
+    test_multithread(10, 10);
+    test_multithread(10, 15);
+    test_multithread(20, 30);
+    test_multithread(20, 20);
+    test_multithread(20, 10);
 }
 
 #if HIDL_RUN_POINTER_TESTS
@@ -1877,6 +1976,11 @@ TEST_F(HidlTest, PointerReportErrorsTest) {
 }
 #endif
 
+template <class T>
+static void waitForServer(const std::string &serviceName) {
+    ::android::hardware::details::waitForHwService(T::descriptor, serviceName);
+}
+
 int forkAndRunTests(TestMode mode, bool enableDelayMeasurementTests) {
     pid_t child;
     int status;
@@ -1985,6 +2089,7 @@ int main(int argc, char **argv) {
         handleStatus(pStatus, "PASSTHROUGH");
     }
     if (b) {
+        EACH_SERVER(waitForServer);
         ALOGI("BINDERIZED Test result = %d", bStatus);
         handleStatus(bStatus, "BINDERIZED ");
     }

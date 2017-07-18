@@ -83,8 +83,8 @@ bool EnumType::canCheckEquality() const {
 }
 
 std::string EnumType::getCppType(StorageMode,
-                                 bool specifyNamespaces) const {
-    return specifyNamespaces ? fullName() : partialCppName();
+                                 bool /* specifyNamespaces */) const {
+    return fullName();
 }
 
 std::string EnumType::getJavaType(bool forInitializer) const {
@@ -415,6 +415,10 @@ status_t EnumType::emitJavaTypeDeclarations(Formatter &out, bool atTopLevel) con
         out << "java.util.ArrayList<String> list = new java.util.ArrayList<>();\n";
         out << bitfieldType << " flipped = 0;\n";
         for (EnumValue *value : values()) {
+            if (value->constExpr()->castSizeT() == 0) {
+                out << "list.add(\"" << value->name() << "\"); // " << value->name() << " == 0\n";
+                continue;
+            }
             out.sIf("(o & " + value->name() + ") == " + value->name(), [&] {
                 out << "list.add(\"" << value->name() << "\");\n";
                 out << "flipped |= " << value->name() << ";\n";
@@ -720,9 +724,6 @@ bool BitFieldType::isBitField() const {
 
 std::string BitFieldType::typeName() const {
     return "mask" + (mElementType == nullptr ? "" : (" of " + mElementType->typeName()));
-}
-
-void BitFieldType::addNamedTypesToSet(std::set<const FQName> &) const {
 }
 
 bool BitFieldType::isCompatibleElementType(Type *elementType) const {
