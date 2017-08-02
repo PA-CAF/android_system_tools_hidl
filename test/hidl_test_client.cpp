@@ -5,7 +5,7 @@
 
 #include <android-base/logging.h>
 
-#include <android/hidl/manager/1.0/IServiceManager.h>
+#include <android/hidl/manager/1.1/IServiceManager.h>
 #include <android/hidl/manager/1.0/IServiceNotification.h>
 
 #include <android/hidl/allocator/1.0/IAllocator.h>
@@ -113,7 +113,7 @@ using ::android::hardware::hidl_string;
 using ::android::hardware::hidl_vec;
 using ::android::hidl::allocator::V1_0::IAllocator;
 using ::android::hidl::base::V1_0::IBase;
-using ::android::hidl::manager::V1_0::IServiceManager;
+using ::android::hidl::manager::V1_1::IServiceManager;
 using ::android::hidl::manager::V1_0::IServiceNotification;
 using ::android::hidl::memory::V1_0::IMemory;
 using ::android::hidl::token::V1_0::ITokenManager;
@@ -588,10 +588,12 @@ TEST_F(HidlTest, ServiceListTest) {
         "android.hardware.tests.inheritance@1.0::IGrandparent/child",
         "android.hardware.tests.foo@1.0::IFoo/foo",
         "android.hidl.manager@1.0::IServiceManager/default",
+        "android.hidl.manager@1.1::IServiceManager/default",
     };
 
     static const std::set<std::string> passthroughSet = {
-        "android.hidl.manager@1.0::IServiceManager/default"
+        "android.hidl.manager@1.0::IServiceManager/default",
+        "android.hidl.manager@1.1::IServiceManager/default",
     };
 
     std::set<std::string> activeSet;
@@ -687,6 +689,40 @@ TEST_F(HidlTest, ServiceNotificationTest) {
     }
 }
 
+TEST_F(HidlTest, ServiceUnregisterTest) {
+    if (mode == BINDERIZED) {
+        const std::string instance = "some-instance-name";
+
+        sp<ServiceNotification> sNotification = new ServiceNotification();
+
+        // unregister all
+        EXPECT_TRUE(IParent::registerForNotifications(instance, sNotification));
+        EXPECT_TRUE(manager->unregisterForNotifications("", "", sNotification));
+
+        // unregister all with instance name
+        EXPECT_TRUE(IParent::registerForNotifications(instance, sNotification));
+        EXPECT_TRUE(manager->unregisterForNotifications(IParent::descriptor,
+            "", sNotification));
+
+        // unregister package listener
+        EXPECT_TRUE(IParent::registerForNotifications("", sNotification));
+        EXPECT_TRUE(manager->unregisterForNotifications(IParent::descriptor,
+            "", sNotification));
+
+        // unregister listener for specific service and name
+        EXPECT_TRUE(IParent::registerForNotifications(instance, sNotification));
+        EXPECT_TRUE(manager->unregisterForNotifications(IParent::descriptor,
+            instance, sNotification));
+
+        EXPECT_FALSE(manager->unregisterForNotifications("", "", sNotification));
+
+        // TODO(b/32837397): remote destructor is lazy
+        // wp<ServiceNotification> wNotification = sNotification;
+        // sNotification = nullptr;
+        // EXPECT_EQ(nullptr, wNotification.promote().get());
+    }
+}
+
 // passthrough TODO(b/31959402)
 TEST_F(HidlTest, ServiceAllNotificationTest) {
     if (mode == BINDERIZED) {
@@ -724,6 +760,8 @@ TEST_F(HidlTest, ServiceAllNotificationTest) {
 }
 
 TEST_F(HidlTest, TestToken) {
+    using android::hardware::interfacesEqual;
+
     Return<void> ret = tokenManager->createToken(manager, [&] (const hidl_vec<uint8_t> &token) {
         Return<sp<IBase>> retService = tokenManager->get(token);
         EXPECT_OK(retService);
@@ -732,10 +770,7 @@ TEST_F(HidlTest, TestToken) {
             EXPECT_NE(nullptr, service.get());
             sp<IServiceManager> retManager = IServiceManager::castFrom(service);
 
-            // TODO(b/33818800): should have only one Bp per process
-            // EXPECT_EQ(manager, retManager);
-
-            EXPECT_NE(nullptr, retManager.get());
+            EXPECT_TRUE(interfacesEqual(manager, retManager));
         }
 
         Return<bool> unregisterRet = tokenManager->unregister(token);
@@ -1623,7 +1658,7 @@ TEST_F(HidlTest, InvalidTransactionTest) {
 
     if (mode == BINDERIZED) {
         EXPECT_TRUE(bar->isRemote());
-        binder = ::android::hardware::toBinder<IBar, BpHwBar>(bar);
+        binder = ::android::hardware::toBinder<IBar>(bar);
     } else {
         // For a local test, just wrap the implementation with a BnHwBar
         binder = new BnHwBar(bar);
